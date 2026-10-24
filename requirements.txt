@@ -1,0 +1,11 @@
+# Install a Blackwell-compatible CUDA build of torch/torchvision FIRST.
+# See README.md; do not replace an existing working server CUDA environment blindly.
+ms-swift>=4.3.1,<4.7
+transformers>=5.9,<5.20
+qwen-vl-utils>=0.0.14
+Pillow>=10
+deepspeed>=0.18.9,<0.20; sys_platform == "linux"
+# Optional CUDA extensions must be built after torch is available:
+# python -m pip install 'flash-linear-attention>=0.4.2' --no-build-isolation
+# python -m pip install causal-conv1d --no-build-isolation
+# flash-attn is optional; the documented configuration uses sdpa.
