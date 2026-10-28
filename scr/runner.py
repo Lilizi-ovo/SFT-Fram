@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .config import load_config, options
+from .data_contract import validate_training_contract
 from .paths import FramError, checkpoint_path, config_path, run_name
 from .runtime import require_runtime
 
@@ -73,6 +74,7 @@ def make_plan(root: Path, mode: str, config_name: str, *, model: str | None = No
                 args.extend([f"--{key}", value])
         if parsed.get("tuner_type", ["full"]) != ["full"]:
             raise FramError("本框架的训练/验证流程要求 --tuner_type full，以完整权重进行验证。")
+        validate_training_contract(root, parsed)
         env.setdefault("NPROC_PER_NODE", "8")
         directory = root / "outputs" / run_name(name) if name else fresh_directory(
             root / "outputs", datetime.now().strftime("%Y%m%d"))
@@ -181,6 +183,13 @@ def execute(plan: Plan, dry_run: bool = False) -> int:
     previous_sigterm = signal.signal(signal.SIGTERM, request_stop)
     try:
         (plan.directory / "parameters.sh").write_bytes(plan.config.read_bytes())
+        if plan.mode == "val" and plan.env.get("FRAM_EVAL_MANIFEST"):
+            manifest = Path(plan.env["FRAM_EVAL_MANIFEST"])
+            if not manifest.is_absolute():
+                manifest = plan.root / manifest
+            if not manifest.is_file():
+                raise FramError(f"分层评分清单不存在，请先运行 tools/prepare_eval.py：{manifest}")
+            (plan.directory / "eval_manifest.jsonl").write_bytes(manifest.read_bytes())
         (plan.directory / "requirements.freeze.txt").write_text(
             "\n".join(f"{key}=={value}" for key, value in runtime["packages"].items() if value) + "\n",
             encoding="utf-8",
@@ -207,6 +216,16 @@ def execute(plan: Plan, dry_run: bool = False) -> int:
             predictions = plan.directory / "predictions.jsonl"
             if not predictions.is_file() or predictions.stat().st_size == 0:
                 raise FramError("Swift 返回成功，但未生成非空 predictions.jsonl，请检查验证参数和 console.log。")
+            if plan.env.get("FRAM_EVAL_MANIFEST"):
+                scoring = [sys.executable, str(plan.root / "tools/score_stratified.py"),
+                           "--manifest", str(plan.directory / "eval_manifest.jsonl"),
+                           "--predictions", str(predictions),
+                           "--output", str(plan.directory / "stratified_metrics.json")]
+                with (plan.directory / "scoring.log").open("w", encoding="utf-8") as log:
+                    scored = subprocess.run(scoring, cwd=plan.root, env=plan.env, stdout=log, stderr=subprocess.STDOUT)
+                if scored.returncode:
+                    raise FramError("分层评分失败，请检查 scoring.log；缺失、重复或无法对齐的预测不会静默忽略。")
+                record["stratified_metrics"] = str((plan.directory / "stratified_metrics.json").relative_to(plan.root))
         record["status"] = "completed" if exit_code == 0 else "failed"
     except (KeyboardInterrupt, StopRequested) as exc:
         record["status"] = "interrupted"

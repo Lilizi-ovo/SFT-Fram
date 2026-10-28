@@ -7,6 +7,7 @@ import io
 import json
 import os
 import signal
+import shutil
 import sys
 import tempfile
 import unittest
@@ -211,6 +212,28 @@ class WorkflowTests(Fixture):
             self.assertEqual(execute(plan), 7)
         record = json.loads((plan.directory / "run.json").read_text(encoding="utf-8"))
         self.assertEqual((record["status"], record["exit_code"]), ("failed", 7))
+
+    def test_validation_automatically_scores_frozen_strata(self):
+        self.weights("run")
+        self.config("val", val=True, extra='export FRAM_EVAL_MANIFEST="$FRAM_ROOT/data/manifest.jsonl"')
+        manifest = dict(id="a", answer="answer", normalized_answer="answer", seen_exact=False,
+                        seen_normalized=False, family="en_rebus", image_overlap_status="no_confirmed_overlap", request_key="ka")
+        (self.root / "data/manifest.jsonl").write_text(json.dumps(manifest)+"\n", encoding="utf-8")
+        target = self.root / "tools"
+        target.mkdir()
+        for name in ("score_stratified.py", "eval_protocol.py"):
+            shutil.copy2(Path(__file__).resolve().parents[1] / "tools" / name, target / name)
+        env = self.fake_swift_env()
+        fake = Path(env["PYTHONPATH"]) / "swift/cli/main.py"
+        fake.write_text(FAKE_SWIFT.replace("{'response': 'answer', 'labels': 'answer'}",
+            "{'id': 'a', 'response': '<think>Check.</think>\\n\\nanswer', 'labels': 'answer'}"), encoding="utf-8")
+        with patch.dict(os.environ, env), patch("scr.runner.require_runtime", return_value={"packages": {}}), contextlib.redirect_stdout(io.StringIO()):
+            plan = make_plan(self.root, "val", "val", model="run")
+            self.assertEqual(execute(plan), 0)
+        report = json.loads((plan.directory / "stratified_metrics.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["groups"]["answer_exact/unseen"]["accuracy_exact"], 1)
+        self.assertTrue((plan.directory / "eval_manifest.jsonl").is_file())
+        self.assertTrue((plan.directory / "stratified_metrics.csv").is_file())
 
     def test_interrupt_records_130_and_stops_child(self):
         self.config()
